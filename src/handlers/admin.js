@@ -230,22 +230,27 @@ async function validateThemeUrlAvailable(themeUrl) {
 
 async function deleteServer(db, id) {
   try {
-    const stmt1 = db.prepare(`PRAGMA foreign_key_list(metrics_history)`);
-    const result1 = await stmt1.all();
-    if (result1.results.length > 0) {
-      await db.prepare('DELETE FROM metrics_history WHERE server_id = ?').bind(id).run();
-    }
-
-    const stmt2 = db.prepare(`PRAGMA foreign_key_list(metrics_history_old)`);
-    const result2 = await stmt2.all();
-    if (result2.results.length > 0) {
-      await db.prepare('DELETE FROM metrics_history_old WHERE server_id = ?').bind(id).run();
+    // metrics_history 没有声明外键，`PRAGMA foreign_key_list` 恒为空，
+    // 若以此作为删除前提，历史数据会永远残留成孤儿行，并让已删除的服务器
+    // 在后续统计/列表中以空壳形式出现。故直接删除，表不存在时忽略。
+    const cleanupTables = ['metrics_history', 'metrics_history_old'];
+    for (const table of cleanupTables) {
+      try {
+        await db.prepare(`DELETE FROM ${table} WHERE server_id = ?`).bind(id).run();
+      } catch (e) {
+        if (!isMissingTableError(e)) throw e;
+      }
     }
 
     await db.prepare('DELETE FROM servers WHERE id = ?').bind(id).run();
   } catch (err) {
     throw err;
   }
+}
+
+function isMissingTableError(error) {
+  const message = error?.message || String(error);
+  return /no such table|does not exist/i.test(message);
 }
 
 function getUtcTodayRange() {
