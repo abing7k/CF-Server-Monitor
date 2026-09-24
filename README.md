@@ -236,6 +236,34 @@ loginctl enable-linger 用户名
 
 卸载时请选择原来的安装用户。OpenWrt、Alpine/OpenRC、Synology DSM 等不支持 `systemd --user` 的环境，请使用对应系统命令。
 
+### 小内存 / 小硬盘机器（NAT 容器）注意事项
+
+在 64 MB / 128 MB 内存、1 GB 磁盘的 Alpine + OpenRC 容器上实测，需要注意三点：
+
+1. **日志默认会落盘**。`-debug=0` 只关闭 DEBUG/WARN，`[INFO]` 日志恒定写 stdout，systemd 会转存 journald，OpenRC 的 `supervise-daemon` 则写入 `output_log`/`error_log` 指向的文件。小盘机器建议直接丢弃日志：
+
+   ```bash
+   # systemd
+   mkdir -p /etc/systemd/system/cf-probe.service.d
+   printf '[Service]\nStandardOutput=null\nStandardError=null\nEnvironment=GOMEMLIMIT=24MiB\nEnvironment=GOGC=50\n' \
+     > /etc/systemd/system/cf-probe.service.d/10-quiet.conf
+   systemctl daemon-reload && systemctl restart cf-probe
+
+   # OpenRC：把 init 脚本里的日志指向 /dev/null
+   sed -i 's|^output_log=.*|output_log="/dev/null"|; s|^error_log=.*|error_log="/dev/null"|' /etc/init.d/cf-probe
+   rc-service cf-probe restart
+   ```
+
+2. **首次安装会与旧探针叠加内存峰值**。若机器上已有其他探针（如 nezha-agent），安装过程中的首次采集可能让 cgroup 触顶并触发 OOM。建议安装前先停掉旧探针，装完再决定是否恢复。
+
+3. **`cpu=100` 是首次采集的瞬时值**。面板首条样本可能显示 100% CPU，下一轮上报即回落（128 MB 容器实测稳定在 1–4%）。不要据此判断探针吃 CPU。
+
+判断内存是否真的紧张时，请看 cgroup 的 `anon`（真实占用）而不是 `memory.current`——后者包含可回收的 page cache，容器空闲时也会被缓存填满：
+
+```bash
+awk '/^anon /{print $2/1048576" MiB anon"}' /sys/fs/cgroup/memory.stat
+```
+
 ## 配置说明
 
 ### Worker 环境变量
