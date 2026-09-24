@@ -205,7 +205,7 @@ V2.8.3 起默认使用独立项目 [cfsm-agent](https://github.com/huilang-me/cf
 | ----------------------------- | ---------------------------- | ---- |
 | `-id`                         | 服务器唯一 ID                     | 必填   |
 | `-secret`                     | Agent 上报密钥，需要等于 `API_SECRET` | 必填   |
-| `-url`                        | Worker 上报地址                  | 必填   |
+| `-url`                        | Worker 上报地址，**必须带 `/update` 路径** | 必填   |
 | `-collect_interval`           | 本机采集间隔；`0` 表示不额外采样           | `0`  |
 | `-interval`                   | 上报间隔，单位秒                     | `60` |
 | `-ct` / `-cu` / `-cm` / `-bd` | 自定义网络质量测试节点，支持 `host[:port]` | 内置节点 |
@@ -214,6 +214,15 @@ V2.8.3 起默认使用独立项目 [cfsm-agent](https://github.com/huilang-me/cf
 | `-tx_correction`              | 上行月流量校正，单位 GB                | 空    |
 
 `-collect_interval` 控制本机额外采集频率，`-interval` 控制上报频率。上报越频繁，Workers 请求和 D1 写入越多。
+
+> **`-url` 必须包含 `/update` 路径**
+>
+> Agent 的 WSS 地址是直接把 `-url` 的 scheme 换成 `wss`、**路径原样保留**推导出来的，不会自动补 `/update`。
+> 如果只写裸域名（如 `https://monitor.example.com`），Agent 会去连 `wss://monitor.example.com/`，
+> 而该路径由静态资源接管、返回 200 + HTML，握手失败并持续重试，日志表现为
+> `WSS retry delayed reason=WSS handshake http=200 body=<!DOCTYPE html>`。
+>
+> 正确写法：`-url=https://monitor.example.com/update`
 
 ### 非 root 安装（推荐）
 

@@ -6,6 +6,15 @@ compatibility_flags = ["nodejs_compat"]
 
 keep_vars = true
 
+# 本账号的 *.workers.dev 路由异常（所有 Worker 均返回 error 1101），
+# 只有自定义域名可用，故显式关闭 workers.dev，避免 Agent 误配错误地址。
+workers_dev = false
+
+# 自定义域名：由 wrangler 自动创建 DNS 记录并签发证书
+[[routes]]
+pattern = "monitor.0378999.xyz"
+custom_domain = true
+
 # 定时任务配置（UTC）
 # - 每分钟：执行离线节点、资源告警
 # - 每小时：合并执行其他定时任务（表轮换、旧表清理、按配置时区/小时触发服务器到期检测）
@@ -20,6 +29,8 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "server-monitor-db"
+# Workers Builds 环境下 wrangler 无法交互式创建 D1，必须显式指定 database_id
+database_id = "df5c9e87-a735-49f2-9721-41ad541b496c"
 
 # Durable Objects：实时指标广播中心
 # 注意：首次部署前需要执行 `wrangler durable-object create MetricsBroadcaster --class MetricsBroadcaster`
