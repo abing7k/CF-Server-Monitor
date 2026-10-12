@@ -1,4 +1,10 @@
-name: Upstream Sync
+# 上游镜像同步。
+#
+# 这里只把 huilang-me/CF-Server-Monitor 的 main 同步到本 fork 的 upstream 分支，
+# 用来随时查看上游进展；**不要**把它指回 main——main 上有本地功能
+# （例如服务端的跨重启累计流量），Fork-Sync 是强制覆盖式同步，
+# 指向 main 会把本地提交直接冲掉。要把上游并进来时，手动 merge 更安全。
+name: Upstream Mirror
 
 permissions:
   contents: write
@@ -26,7 +32,7 @@ jobs:
         with:
           upstream_sync_repo: huilang-me/CF-Server-Monitor
           upstream_sync_branch: main
-          target_sync_branch: main
+          target_sync_branch: upstream
           target_repo_token: ${{ secrets.GITHUB_TOKEN }} # automatically generated, no need to set
 
           # Set test_mode true to run tests instead of the true action!!
@@ -35,6 +41,6 @@ jobs:
       - name: Sync check
         if: failure()
         run: |
-          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，请前往仓库页面手动执行 Sync Fork 操作。"
-          echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork."
+          echo "[Error] 上游镜像同步失败（常见原因：上游改动了 workflow 文件，GitHub 会暂停本次同步）。"
+          echo "[Error] 这只影响 upstream 镜像分支，main 不受影响；需要更新镜像时可在 Actions 里手动重跑。"
           exit 1

@@ -8,6 +8,8 @@ on:
       - '**.md'
       - '.gitignore'
       - 'LICENSE'
+      # 只改工作流本身不需要重新部署
+      - '.github/**'
   workflow_dispatch:
 
 jobs:
