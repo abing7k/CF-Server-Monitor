@@ -111,6 +111,10 @@ export async function initDatabase(db) {
           offline_notify_disabled TEXT DEFAULT '0',
           is_hidden TEXT DEFAULT '0',
           sort_order INTEGER DEFAULT 0,
+          traffic_rx_total REAL DEFAULT 0,
+          traffic_tx_total REAL DEFAULT 0,
+          traffic_last_rx REAL DEFAULT 0,
+          traffic_last_tx REAL DEFAULT 0,
           history_partition_id INTEGER DEFAULT 0,
           timestamp INTEGER DEFAULT 0
         )
@@ -626,54 +630,92 @@ export async function weeklyCleanup(db) {
  *
  * 探针只报告两个口径：网卡计数（net_rx/net_tx，重启后从 0 重新开始）与本月计数
  * （net_rx_monthly/net_tx_monthly，只有账单周期切换才会归零）。因此「累计」必须由
- * 服务端维护：以上一条历史记录为基准累加增量，计数器回退（重启或网卡重建）时把
- * 该次增量记 0，已有累计值保持不变。
+ * 服务端维护：按网卡计数增量累加，计数器回退（重启或网卡重建）时把该次增量记 0，
+ * 已有累计值保持不变。
  *
- * 首次累计（没有上一条记录，或上一条是旧版本写入的空值）用
- * max(网卡计数, 本月计数) 作为下界：累计流量不可能小于本月流量，
- * 也不小于本次开机以来跑掉的量，这样升级后不会出现「累计 < 本月」的倒挂。
+ * 状态存在 servers 表，而不是 metrics_history：后者每周会被 weeklyCleanup 轮换清空，
+ * 放进去每周都会从头再来。
+ *
+ * 性能上必须走主键：servers 表按 id 查是 O(1)，一次读取一行。
+ * 千万不要改成去 metrics_history 里「查上一条记录」——那张表走 id 前缀优化、
+ * 没有 (server_id, timestamp) 索引，这种查询会全表扫描，把 D1 每天 500 万行的
+ * 读取额度打爆（2026-10-12 就是这么出事的）。
+ *
+ * 首次累计用 max(网卡计数, 本月计数) 作为下界：累计流量不可能小于本月流量，
+ * 也不小于本次开机以来跑掉的量，升级后不会出现「累计 < 本月」的倒挂。
  */
-async function resolveTrafficTotals(db, serverId, metrics, timestamp) {
+const TRAFFIC_STATE_COLUMNS = {
+  traffic_rx_total: 'REAL DEFAULT 0',
+  traffic_tx_total: 'REAL DEFAULT 0',
+  traffic_last_rx: 'REAL DEFAULT 0',
+  traffic_last_tx: 'REAL DEFAULT 0'
+};
+
+let trafficStateColumnsReady = null;
+
+// 老库补列：新建的库建表时已带这些列，历史库在首次用到时补上（每个 isolate 只检查一次）
+function ensureTrafficStateColumns(db) {
+  if (!trafficStateColumnsReady) {
+    trafficStateColumnsReady = (async () => {
+      const { results: columns = [] } = await db.prepare('PRAGMA table_info(servers)').all();
+      const existing = new Set(columns.map(c => c.name));
+      for (const [name, def] of Object.entries(TRAFFIC_STATE_COLUMNS)) {
+        if (existing.has(name)) continue;
+        try {
+          await db.prepare(`ALTER TABLE servers ADD COLUMN ${name} ${def}`).run();
+          debug(`servers 表补列 ${name}`);
+        } catch (e) {
+          // 多个 isolate 同时补列时，后到的会撞上 duplicate column，忽略即可
+          if (!/duplicate column/i.test(String(e?.message || e))) throw e;
+        }
+      }
+    })().catch(e => {
+      // 失败（例如 D1 读额度耗尽）时清掉缓存的 Promise，下次上报再重试
+      trafficStateColumnsReady = null;
+      throw e;
+    });
+  }
+  return trafficStateColumnsReady;
+}
+
+async function resolveTrafficTotals(db, serverId, metrics) {
   const currentRx = parseFloat(metrics.net_rx) || 0;
   const currentTx = parseFloat(metrics.net_tx) || 0;
   const seedRx = Math.max(currentRx, parseFloat(metrics.net_rx_monthly) || 0);
   const seedTx = Math.max(currentTx, parseFloat(metrics.net_tx_monthly) || 0);
-  const fallback = { net_rx_total: seedRx, net_tx_total: seedTx };
+
+  let totalRx = seedRx;
+  let totalTx = seedTx;
 
   try {
-    const previous = await db.prepare(`
-      SELECT net_rx, net_tx, net_rx_monthly, net_tx_monthly, net_rx_total, net_tx_total
-      FROM metrics_history
-      WHERE server_id = ? AND timestamp < ?
-      ORDER BY timestamp DESC
-      LIMIT 1
-    `).bind(serverId, timestamp).first();
+    await ensureTrafficStateColumns(db);
 
-    if (!previous) return fallback;
+    const state = await db.prepare(
+      'SELECT traffic_rx_total, traffic_tx_total, traffic_last_rx, traffic_last_tx FROM servers WHERE id = ?'
+    ).bind(serverId).first();
 
-    const prevRx = parseFloat(previous.net_rx) || 0;
-    const prevTx = parseFloat(previous.net_tx) || 0;
-    const prevTotalRx = parseFloat(previous.net_rx_total) || 0;
-    const prevTotalTx = parseFloat(previous.net_tx_total) || 0;
+    if (state) {
+      const storedRx = parseFloat(state.traffic_rx_total) || 0;
+      const storedTx = parseFloat(state.traffic_tx_total) || 0;
+      const lastRx = parseFloat(state.traffic_last_rx) || 0;
+      const lastTx = parseFloat(state.traffic_last_tx) || 0;
 
-    const baseRx = prevTotalRx > 0
-      ? prevTotalRx
-      : Math.max(prevRx, parseFloat(previous.net_rx_monthly) || 0);
-    const baseTx = prevTotalTx > 0
-      ? prevTotalTx
-      : Math.max(prevTx, parseFloat(previous.net_tx_monthly) || 0);
+      // 只有存过累计值才按增量累加；计数器回退（重启）时该次增量记 0。
+      const deltaRx = storedRx > 0 && currentRx >= lastRx ? currentRx - lastRx : 0;
+      const deltaTx = storedTx > 0 && currentTx >= lastTx ? currentTx - lastTx : 0;
 
-    const deltaRx = currentRx >= prevRx ? currentRx - prevRx : 0;
-    const deltaTx = currentTx >= prevTx ? currentTx - prevTx : 0;
+      totalRx = (storedRx > 0 ? storedRx : seedRx) + deltaRx;
+      totalTx = (storedTx > 0 ? storedTx : seedTx) + deltaTx;
+    }
 
-    return {
-      net_rx_total: baseRx + deltaRx,
-      net_tx_total: baseTx + deltaTx
-    };
+    await db.prepare(
+      'UPDATE servers SET traffic_rx_total = ?, traffic_tx_total = ?, traffic_last_rx = ?, traffic_last_tx = ? WHERE id = ?'
+    ).bind(totalRx, totalTx, currentRx, currentTx, serverId).run();
   } catch (e) {
-    console.warn('累计流量计算失败，退回下界值:', e?.message || e);
-    return fallback;
+    console.warn('累计流量更新失败，沿用下界值:', e?.message || e);
   }
+
+  return { net_rx_total: totalRx, net_tx_total: totalTx };
 }
 
 export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
@@ -683,7 +725,7 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
     : Date.now();
 
-  const trafficTotals = await resolveTrafficTotals(db, serverId, metrics, now);
+  const trafficTotals = await resolveTrafficTotals(db, serverId, metrics);
 
   const DISABLED_PROBE_VALUE = 'false';
 

@@ -156,6 +156,10 @@ export async function addServerColumns(db) {
       traffic_alert_state: "TEXT",
       interface: "TEXT DEFAULT ''",
       history_partition_id: "INTEGER DEFAULT 0",
+      traffic_rx_total: "REAL DEFAULT 0",
+      traffic_tx_total: "REAL DEFAULT 0",
+      traffic_last_rx: "REAL DEFAULT 0",
+      traffic_last_tx: "REAL DEFAULT 0",
       timestamp: "INTEGER DEFAULT 0"
     };
     
