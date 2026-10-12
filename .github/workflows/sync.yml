@@ -24,6 +24,9 @@ jobs:
       # Step 1: run a standard checkout action
       - name: Checkout target repo
         uses: actions/checkout@v3
+        with:
+          # 同步目标是 upstream 镜像分支，默认只拉当前分支会 checkout 不到它
+          fetch-depth: 0
 
       # Step 2: run the sync action
       - name: Sync upstream changes
