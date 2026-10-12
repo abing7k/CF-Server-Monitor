@@ -175,6 +175,15 @@ export function mergeMetricsIntoServer(server, metrics) {
   server.net_tx = metrics.net_tx || 0;
   server.net_rx_monthly = metrics.net_rx_monthly || 0;
   server.net_tx_monthly = metrics.net_tx_monthly || 0;
+  /*
+   * 跨重启累计流量（服务端按增量累加，见 schema.js 的 resolveTrafficTotals）。
+   * 只在已经算出正数时下发：历史行还没迁移或还没写过累计时留空，
+   * 前端会回退到网卡计数，不会把 0 当成真实累计值。
+   */
+  const rxTotal = parseFloat(metrics.net_rx_total);
+  if (Number.isFinite(rxTotal) && rxTotal > 0) server.net_rx_total = rxTotal;
+  const txTotal = parseFloat(metrics.net_tx_total);
+  if (Number.isFinite(txTotal) && txTotal > 0) server.net_tx_total = txTotal;
   server.processes = metrics.processes || 0;
   server.tcp_conn = metrics.tcp_conn || 0;
   server.udp_conn = metrics.udp_conn || 0;

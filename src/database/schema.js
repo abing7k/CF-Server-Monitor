@@ -621,12 +621,69 @@ export async function weeklyCleanup(db) {
   }
 }
 
+/*
+ * 跨重启的累计流量。
+ *
+ * 探针只报告两个口径：网卡计数（net_rx/net_tx，重启后从 0 重新开始）与本月计数
+ * （net_rx_monthly/net_tx_monthly，只有账单周期切换才会归零）。因此「累计」必须由
+ * 服务端维护：以上一条历史记录为基准累加增量，计数器回退（重启或网卡重建）时把
+ * 该次增量记 0，已有累计值保持不变。
+ *
+ * 首次累计（没有上一条记录，或上一条是旧版本写入的空值）用
+ * max(网卡计数, 本月计数) 作为下界：累计流量不可能小于本月流量，
+ * 也不小于本次开机以来跑掉的量，这样升级后不会出现「累计 < 本月」的倒挂。
+ */
+async function resolveTrafficTotals(db, serverId, metrics, timestamp) {
+  const currentRx = parseFloat(metrics.net_rx) || 0;
+  const currentTx = parseFloat(metrics.net_tx) || 0;
+  const seedRx = Math.max(currentRx, parseFloat(metrics.net_rx_monthly) || 0);
+  const seedTx = Math.max(currentTx, parseFloat(metrics.net_tx_monthly) || 0);
+  const fallback = { net_rx_total: seedRx, net_tx_total: seedTx };
+
+  try {
+    const previous = await db.prepare(`
+      SELECT net_rx, net_tx, net_rx_monthly, net_tx_monthly, net_rx_total, net_tx_total
+      FROM metrics_history
+      WHERE server_id = ? AND timestamp < ?
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `).bind(serverId, timestamp).first();
+
+    if (!previous) return fallback;
+
+    const prevRx = parseFloat(previous.net_rx) || 0;
+    const prevTx = parseFloat(previous.net_tx) || 0;
+    const prevTotalRx = parseFloat(previous.net_rx_total) || 0;
+    const prevTotalTx = parseFloat(previous.net_tx_total) || 0;
+
+    const baseRx = prevTotalRx > 0
+      ? prevTotalRx
+      : Math.max(prevRx, parseFloat(previous.net_rx_monthly) || 0);
+    const baseTx = prevTotalTx > 0
+      ? prevTotalTx
+      : Math.max(prevTx, parseFloat(previous.net_tx_monthly) || 0);
+
+    const deltaRx = currentRx >= prevRx ? currentRx - prevRx : 0;
+    const deltaTx = currentTx >= prevTx ? currentTx - prevTx : 0;
+
+    return {
+      net_rx_total: baseRx + deltaRx,
+      net_tx_total: baseTx + deltaTx
+    };
+  } catch (e) {
+    console.warn('累计流量计算失败，退回下界值:', e?.message || e);
+    return fallback;
+  }
+}
+
 export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
   const historyId = buildHistoryId(historyPartitionId, timestamp);
   const rawTimestamp = Number(timestamp);
   const now = Number.isFinite(rawTimestamp) && rawTimestamp > 0
     ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
     : Date.now();
+
+  const trafficTotals = await resolveTrafficTotals(db, serverId, metrics, now);
 
   const DISABLED_PROBE_VALUE = 'false';
 
@@ -705,7 +762,9 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     metrics.ip_v6 || '0',
     metrics.boot_time || '',
     parseFloat(metrics.net_rx_monthly) || 0,
-    parseFloat(metrics.net_tx_monthly) || 0
+    parseFloat(metrics.net_tx_monthly) || 0,
+    trafficTotals.net_rx_total,
+    trafficTotals.net_tx_total
     ).run();
   };
 

@@ -9,7 +9,8 @@ export const NUMERIC_METRIC_FIELDS = Object.freeze([
   'ram_total', 'ram_used', 'swap_total', 'swap_used',
   'disk_total', 'disk_used', 'cpu_cores',
   'disk_read_bps', 'disk_write_bps', 'disk_read_iops',
-  'disk_write_iops', 'disk_await_ms', 'disk_util'
+  'disk_write_iops', 'disk_await_ms', 'disk_util',
+  'net_rx_total', 'net_tx_total'
 ]);
 
 export const HISTORY_ALL_QUERY_COLUMNS = Object.freeze([
@@ -138,7 +139,14 @@ export const HISTORY_TABLE_COLUMNS = Object.freeze([
   ['ip_v6', "TEXT DEFAULT '0'"],
   ['boot_time', "TEXT DEFAULT ''"],
   ['net_rx_monthly', 'REAL DEFAULT 0'],
-  ['net_tx_monthly', 'REAL DEFAULT 0']
+  ['net_tx_monthly', 'REAL DEFAULT 0'],
+  /*
+   * 跨重启的累计流量：由服务端按增量累加，探针只需要报告网卡计数与本月计数。
+   * 必须追加在列表末尾——HISTORY_INSERT_COLUMNS 直接沿用这里的顺序，
+   * 新增列放在末尾可以保证 INSERT 的绑定顺序不受影响。
+   */
+  ['net_rx_total', 'REAL DEFAULT 0'],
+  ['net_tx_total', 'REAL DEFAULT 0']
 ]);
 
 export const HISTORY_INSERT_COLUMNS = Object.freeze(
