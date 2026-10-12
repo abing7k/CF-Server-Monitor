@@ -651,34 +651,69 @@ const TRAFFIC_STATE_COLUMNS = {
   traffic_last_tx: 'REAL DEFAULT 0'
 };
 
-let trafficStateColumnsReady = null;
+// 每个 D1 绑定只检查一次（用 WeakMap 而不是单个变量，避免同一个 isolate 上多份 db 互相影响）
+const trafficStateColumnsReady = new WeakMap();
 
-// 老库补列：新建的库建表时已带这些列，历史库在首次用到时补上（每个 isolate 只检查一次）
+// 老库补列：新建的库建表时已带这些列，历史库在首次用到时补上
 function ensureTrafficStateColumns(db) {
-  if (!trafficStateColumnsReady) {
-    trafficStateColumnsReady = (async () => {
-      const { results: columns = [] } = await db.prepare('PRAGMA table_info(servers)').all();
-      const existing = new Set(columns.map(c => c.name));
-      for (const [name, def] of Object.entries(TRAFFIC_STATE_COLUMNS)) {
-        if (existing.has(name)) continue;
-        try {
-          await db.prepare(`ALTER TABLE servers ADD COLUMN ${name} ${def}`).run();
-          debug(`servers 表补列 ${name}`);
-        } catch (e) {
-          // 多个 isolate 同时补列时，后到的会撞上 duplicate column，忽略即可
-          if (!/duplicate column/i.test(String(e?.message || e))) throw e;
-        }
+  const cached = trafficStateColumnsReady.get(db);
+  if (cached) return cached;
+
+  const ready = (async () => {
+    const { results: columns = [] } = await db.prepare('PRAGMA table_info(servers)').all();
+    const existing = new Set(columns.map(c => c.name));
+    for (const [name, def] of Object.entries(TRAFFIC_STATE_COLUMNS)) {
+      if (existing.has(name)) continue;
+      try {
+        await db.prepare(`ALTER TABLE servers ADD COLUMN ${name} ${def}`).run();
+        debug(`servers 表补列 ${name}`);
+      } catch (e) {
+        // 多个 isolate 同时补列时，后到的会撞上 duplicate column，忽略即可
+        if (!/duplicate column/i.test(String(e?.message || e))) throw e;
       }
-    })().catch(e => {
-      // 失败（例如 D1 读额度耗尽）时清掉缓存的 Promise，下次上报再重试
-      trafficStateColumnsReady = null;
-      throw e;
-    });
-  }
-  return trafficStateColumnsReady;
+    }
+  })().catch(e => {
+    // 失败（例如 D1 读额度耗尽）时清掉缓存，下次上报再重试
+    trafficStateColumnsReady.delete(db);
+    throw e;
+  });
+
+  trafficStateColumnsReady.set(db, ready);
+  return ready;
 }
 
-async function resolveTrafficTotals(db, serverId, metrics) {
+// 升级后的第一次上报：servers 表里还没有累计状态，尽量承接历史记录里的累计值，
+// 这样「总流量」不会因为换了存储位置而从当月流量重新开始。
+// 查询走 history_partition_id 拼出的主键区间，是有界的主键范围扫描，代价极低；
+// 这里也不能写成按 timestamp 倒序的 server_id 过滤（那会退化成全表扫描）。
+async function readHistoryCarry(db, historyPartitionId) {
+  const empty = { rx: 0, tx: 0 };
+  const partitionId = Number(historyPartitionId);
+  if (!Number.isInteger(partitionId) || partitionId <= 0) return empty;
+
+  try {
+    const { startId, endId } = getHistoryIdRange(partitionId);
+    const row = await db.prepare(`
+      SELECT net_rx_total, net_tx_total
+      FROM metrics_history
+      WHERE id >= ?
+        AND id <= ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).bind(startId, endId).first();
+
+    if (!row) return empty;
+    return {
+      rx: parseFloat(row.net_rx_total) || 0,
+      tx: parseFloat(row.net_tx_total) || 0
+    };
+  } catch (e) {
+    debug('承接历史累计流量失败，改用下界值:', e?.message || e);
+    return empty;
+  }
+}
+
+async function resolveTrafficTotals(db, serverId, historyPartitionId, metrics) {
   const currentRx = parseFloat(metrics.net_rx) || 0;
   const currentTx = parseFloat(metrics.net_tx) || 0;
   const seedRx = Math.max(currentRx, parseFloat(metrics.net_rx_monthly) || 0);
@@ -700,12 +735,22 @@ async function resolveTrafficTotals(db, serverId, metrics) {
       const lastRx = parseFloat(state.traffic_last_rx) || 0;
       const lastTx = parseFloat(state.traffic_last_tx) || 0;
 
+      let baseRx = storedRx > 0 ? storedRx : seedRx;
+      let baseTx = storedTx > 0 ? storedTx : seedTx;
+
+      // 还没有累计状态时先承接历史值（升级后第一次上报会走到这里）
+      if (storedRx <= 0 || storedTx <= 0) {
+        const carry = await readHistoryCarry(db, historyPartitionId);
+        if (storedRx <= 0) baseRx = Math.max(baseRx, carry.rx);
+        if (storedTx <= 0) baseTx = Math.max(baseTx, carry.tx);
+      }
+
       // 只有存过累计值才按增量累加；计数器回退（重启）时该次增量记 0。
       const deltaRx = storedRx > 0 && currentRx >= lastRx ? currentRx - lastRx : 0;
       const deltaTx = storedTx > 0 && currentTx >= lastTx ? currentTx - lastTx : 0;
 
-      totalRx = (storedRx > 0 ? storedRx : seedRx) + deltaRx;
-      totalTx = (storedTx > 0 ? storedTx : seedTx) + deltaTx;
+      totalRx = baseRx + deltaRx;
+      totalTx = baseTx + deltaTx;
     }
 
     await db.prepare(
@@ -725,7 +770,7 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
     : Date.now();
 
-  const trafficTotals = await resolveTrafficTotals(db, serverId, metrics);
+  const trafficTotals = await resolveTrafficTotals(db, serverId, historyPartitionId, metrics);
 
   const DISABLED_PROBE_VALUE = 'false';
 
