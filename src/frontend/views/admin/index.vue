@@ -609,6 +609,10 @@ const router = useRouter()
 const appConfig = inject('appConfig', {})
 let startupConfigConsumed = false
 const AGENT_RELEASE_URL = 'https://api.github.com/repos/huilang-me/cfsm-agent/releases/latest'
+// 自建 Worker：安装/卸载脚本走 abing7k/cfsm-agent 的 my 分支（默认安装固定版本的 agent），
+// 避免上游发布新版本后，新装/重装的机器拿到跟自建 Worker 不匹配的 agent。
+const AGENT_INSTALL_SCRIPT_BASE = '/abing7k/cfsm-agent/my'
+const agentInstallScriptPath = (file) => `${AGENT_INSTALL_SCRIPT_BASE}/${file}`
 const AGENT_RELEASE_FAILURE_TTL = 30 * 1000
 
 let cachedAgentReleaseVersion = ''
@@ -1825,12 +1829,12 @@ const getUninstallCommand = () => {
   const proxy = isGo ? deleteGhProxy.value.trim() : ''
   if (isGo) {
     if (deleteTargetOs.value === 'windows') {
-      const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
+      const ghUrl = buildGhRawUrl(proxy, agentInstallScriptPath('install.ps1'))
       const proxyParam = proxy ? ` ${quotePowerShellArg(`--install-ghproxy=${proxy}`)}` : ''
       return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall${proxyParam}`
     }
     const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
-    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
+    const ghUrl = buildGhRawUrl(proxy, agentInstallScriptPath('install.sh'))
     const proxyParam = proxy ? ` ${quotePosixShellArg(`--install-ghproxy=${proxy}`)}` : ''
     const uninstallCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | ${sudoPrefix}sh -s -- uninstall${proxyParam}`
     if (deleteTargetOs.value === 'linux' && deleteInstallMode.value === 'cfsm-user') {
@@ -1991,7 +1995,7 @@ const getCustomInstallCommand = () => {
     if (networkInterface.value) params.push(`-interface='${networkInterface.value}'`)
     if (hasCorrectionValue(rxCorrection.value)) params.push(`-rx_correction='${rxCorrection.value}'`)
     if (hasCorrectionValue(txCorrection.value)) params.push(`-tx_correction='${txCorrection.value}'`)
-    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
+    const ghUrl = buildGhRawUrl(proxy, agentInstallScriptPath('install.ps1'))
     return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
   }
   const params = ['install']
@@ -2016,7 +2020,7 @@ const getCustomInstallCommand = () => {
   if (networkInterface.value) params.push(`-interface=${networkInterface.value}`)
   if (hasCorrectionValue(rxCorrection.value)) params.push(`-rx_correction=${rxCorrection.value}`)
   if (hasCorrectionValue(txCorrection.value)) params.push(`-tx_correction=${txCorrection.value}`)
-  const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
+  const ghUrl = buildGhRawUrl(proxy, agentInstallScriptPath('install.sh'))
   const installCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | sh -s -- ${params.join(' ')}`
   if (!isDedicatedUserInstall) return installCommand
 
